@@ -11,6 +11,7 @@ every settlement branch.
 """
 
 import hashlib
+import inspect
 import json
 import os
 import sys
@@ -49,6 +50,17 @@ _spec.loader.exec_module(verity_oracle)  # type: ignore[union-attr]
 VerityOracle = verity_oracle.VerityOracle
 
 GEN = 10**18
+
+
+class GenVMCompatibilityTests(unittest.TestCase):
+    def test_evm_interface_arguments_are_positional_only(self):
+        view = verity_oracle.VerityOracleView.View
+        for method_name in ("get_result", "is_resolved"):
+            signature = inspect.signature(getattr(view, method_name))
+            self.assertEqual(
+                signature.parameters["request_id"].kind,
+                inspect.Parameter.POSITIONAL_ONLY,
+            )
 
 OWNER = Address("0xOwner000000000000000000000000000000001")
 REQUESTER = Address("0xRequester00000000000000000000000000001")

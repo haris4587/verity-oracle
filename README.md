@@ -82,7 +82,7 @@ contracts/verity_oracle.py
 SHA-256 of the current canonical source:
 
 ```text
-3cfc6476f0e4e6979051282fa5bc45a5623783c98777bf8624373d69400473ef
+cd4037a055e52e1062991e05ccf667ca70413b287f081c2696f966ec55368a45
 ```
 
 ## Deployment and live verification

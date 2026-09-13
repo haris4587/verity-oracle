@@ -25,10 +25,10 @@ from genlayer import *
 @gl.evm.contract_interface
 class VerityOracle:
     class View:
-        def get_result(self, request_id: str) -> str:
+        def get_result(self, request_id: str, /) -> str:
             pass
 
-        def is_resolved(self, request_id: str) -> bool:
+        def is_resolved(self, request_id: str, /) -> bool:
             pass
 
     class Write:

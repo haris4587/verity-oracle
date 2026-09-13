@@ -201,10 +201,12 @@ class VerityOracleView:
     """Read surface that other contracts use to consume resolutions."""
 
     class View:
-        def get_result(self, request_id: str) -> str:
+        # GenLayer's EVM proxy generator requires interface arguments to be
+        # positional-only so proxy calls have one canonical ABI encoding.
+        def get_result(self, request_id: str, /) -> str:
             pass
 
-        def is_resolved(self, request_id: str) -> bool:
+        def is_resolved(self, request_id: str, /) -> bool:
             pass
 
     class Write:
