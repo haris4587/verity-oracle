@@ -297,7 +297,6 @@ class VerityOracle(gl.Contract):
         self.total_surplus_withdrawn = u256(0)
         self.total_reserved = u256(0)
         self.total_funding = u256(0)
-        self.recent_ids = DynArray()
 
     # ------------------------------------------------------------------
     # Internal helpers (deterministic; never run inside nondeterministic mode)

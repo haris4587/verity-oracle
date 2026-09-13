@@ -67,7 +67,7 @@ Run the local direct-mode regression suite:
 python -m unittest discover -s tests -v
 ```
 
-Current result: **48/48 tests passing**.
+Current result: **50/50 tests passing**.
 
 The local suite uses `tests/fake_genlayer.py` to deterministically exercise contract state transitions, evidence failures, consensus disagreement, deadline enforcement, proposal restrictions, and settlement accounting. It is not presented as a substitute for live GenLayer validator execution; finalized Studio/Explorer transactions are the deployment proof.
 
@@ -82,7 +82,7 @@ contracts/verity_oracle.py
 SHA-256 of the current canonical source:
 
 ```text
-cd4037a055e52e1062991e05ccf667ca70413b287f081c2696f966ec55368a45
+3330233500f73392410bc6186c4e6a3a91bbee7e7a2d7a40670fb6c38f4d55f4
 ```
 
 ## Deployment and live verification

@@ -62,6 +62,11 @@ class GenVMCompatibilityTests(unittest.TestCase):
                 inspect.Parameter.POSITIONAL_ONLY,
             )
 
+    def test_constructor_does_not_instantiate_runtime_storage_collections(self):
+        constructor_source = inspect.getsource(VerityOracle.__init__)
+        self.assertNotIn("DynArray()", constructor_source)
+        self.assertNotIn("TreeMap()", constructor_source)
+
 OWNER = Address("0xOwner000000000000000000000000000000001")
 REQUESTER = Address("0xRequester00000000000000000000000000001")
 PROPOSER_A = Address("0xProposerA000000000000000000000000001")

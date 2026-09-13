@@ -10,12 +10,12 @@ Run:
 python -m unittest discover -s tests -v
 ```
 
-Expected result for this revision: **48 tests passing**.
+Expected result for this revision: **50 tests passing**.
 
 Canonical source SHA-256:
 
 ```text
-cd4037a055e52e1062991e05ccf667ca70413b287f081c2696f966ec55368a45
+3330233500f73392410bc6186c4e6a3a91bbee7e7a2d7a40670fb6c38f4d55f4
 ```
 
 You can reproduce it with:
