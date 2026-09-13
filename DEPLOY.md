@@ -44,6 +44,15 @@ genvm-lint contracts/verity_oracle.py
 5. Wait for finalization and verify successful execution.
 6. Record the contract address, deployment transaction, Explorer contract URL, deployed commit SHA, and canonical source hash.
 
+### Finalized deployment
+
+- Contract address: [`0xb9DfAFb2366944f83E99855966d0dBC90b879fa9`](https://explorer-studio.genlayer.com/address/0xb9DfAFb2366944f83E99855966d0dBC90b879fa9)
+- Transaction: [`0x57daa68596b2766bfddd043294d0ac2d90c08fea9bcd8eea425e4c5035140a17`](https://explorer-studio.genlayer.com/tx/0x57daa68596b2766bfddd043294d0ac2d90c08fea9bcd8eea425e4c5035140a17)
+- Source commit: [`917aa47`](https://github.com/haris4587/verity-oracle/commit/917aa47f3e3a99f19b2eed35de484c92943a61cc)
+- Source SHA-256: `3330233500f73392410bc6186c4e6a3a91bbee7e7a2d7a40670fb6c38f4d55f4`
+- Execution mode: Normal (Full Consensus), five initial validators
+- Result: `FINALIZED`, consensus `Accepted`, GenVM `SUCCESS`
+
 ## 3. Read smoke test
 
 After deployment, verify at minimum:
@@ -51,9 +60,14 @@ After deployment, verify at minimum:
 - `get_version()` returns `1.2.0`;
 - `get_totals()` returns the initialized accounting state.
 
-## 4. Live write-path proof
+Verified live against the finalized deployment:
 
-For the review proof, exercise the deployed contract rather than relying only on local tests:
+- `get_version()` returned `1.2.0`;
+- `get_totals()` returned version `1.2.0` with zero balance, reserve, surplus, requests, proposals, resolutions, rewards, bonds, refunds, funding, and withdrawals.
+
+## 4. Payable lifecycle verification
+
+GenLayer Studio currently reports that token transfers are unsupported, so the payable reward/bond lifecycle cannot be truthfully demonstrated there. The 50-test direct-mode suite covers every payout, refund, bond return, slashing, surplus, and safe-`UNRESOLVABLE` branch. When Studio enables transfers, verify the full deployed lifecycle as follows:
 
 1. Prepare 2–6 stable public HTTPS resources from at least two independent publisher families. URLs must use lowercase `https://`, include a path, and contain no credentials, custom port, query, fragment, backslash, or IP-literal authority.
 2. Compute the SHA-256 digest of each exact response body and the canonical bundle hash expected by the contract.
@@ -78,4 +92,4 @@ Keep direct links for:
 - finalized `get_result` / request state;
 - optional failure-path proof demonstrating safe `UNRESOLVABLE` handling.
 
-The live Explorer evidence is the proof of GenLayer execution and validator consensus. Local mocked tests are supporting regression evidence only.
+The finalized Explorer deployment and live reads prove GenLayer execution and validator consensus. The local suite supplies deterministic coverage for the payable lifecycle that the current Studio cannot execute.

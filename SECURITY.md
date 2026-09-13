@@ -34,7 +34,7 @@ Settlement proceeds only after GenLayer consensus. Model wording may vary, but t
 - Exact-byte commitments are intentionally strict. Dynamic pages may later fail authentication and safely resolve as `UNRESOLVABLE`.
 - A requester can still cherry-pick otherwise authentic sources. Consumers must treat the final answer as scoped to the displayed locked evidence bundle.
 - Publisher-family grouping is deliberately conservative and is not a universal public-suffix implementation.
-- Local tests use a small SDK stand-in. A finalized GenLayer Studio/Explorer deployment and live write-path transaction are required as execution proof.
+- Local tests use a small SDK stand-in. The finalized GenLayer Studio/Explorer deployment proves GenVM execution and validator consensus; the payable lifecycle remains locally verified until Studio supports token transfers.
 
 ## Responsible disclosure
 

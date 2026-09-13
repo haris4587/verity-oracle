@@ -87,7 +87,15 @@ SHA-256 of the current canonical source:
 
 ## Deployment and live verification
 
-See [`DEPLOY.md`](./DEPLOY.md) for the Studio deployment and evidence checklist. After deployment, the repository will record the deployed contract address, transaction/Explorer links, exact commit SHA, and live write/read verification evidence.
+The canonical source was deployed in GenLayer Studio using Normal (Full Consensus) execution:
+
+- Contract: [`0xb9DfAFb2366944f83E99855966d0dBC90b879fa9`](https://explorer-studio.genlayer.com/address/0xb9DfAFb2366944f83E99855966d0dBC90b879fa9)
+- Deployment transaction: [`0x57daa68596b2766bfddd043294d0ac2d90c08fea9bcd8eea425e4c5035140a17`](https://explorer-studio.genlayer.com/tx/0x57daa68596b2766bfddd043294d0ac2d90c08fea9bcd8eea425e4c5035140a17)
+- Deployed source commit: [`917aa47`](https://github.com/haris4587/verity-oracle/commit/917aa47f3e3a99f19b2eed35de484c92943a61cc)
+- Deployment status: `FINALIZED`; consensus result: `Accepted`; GenVM execution: `SUCCESS`
+- Live reads: `get_version()` returned `1.2.0`; `get_totals()` returned the zero-initialized accounting state
+
+See [`DEPLOY.md`](./DEPLOY.md) for the verification record and lifecycle checklist.
 
 ## Reusable contract interface
 
