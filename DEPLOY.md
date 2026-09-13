@@ -10,12 +10,12 @@ Run:
 python -m unittest discover -s tests -v
 ```
 
-Expected result for this revision: **37 tests passing**.
+Expected result for this revision: **48 tests passing**.
 
 Canonical source SHA-256:
 
 ```text
-c4ef57b25c1ac4bd95a0c58b6b16f810326ada893241527e46b6859823113b1c
+3cfc6476f0e4e6979051282fa5bc45a5623783c98777bf8624373d69400473ef
 ```
 
 You can reproduce it with:
@@ -48,21 +48,21 @@ genvm-lint contracts/verity_oracle.py
 
 After deployment, verify at minimum:
 
-- `get_version()` returns `1.1.0`;
+- `get_version()` returns `1.2.0`;
 - `get_totals()` returns the initialized accounting state.
 
 ## 4. Live write-path proof
 
 For the review proof, exercise the deployed contract rather than relying only on local tests:
 
-1. Prepare 2–6 stable public HTTPS sources from at least two hostnames.
+1. Prepare 2–6 stable public HTTPS resources from at least two independent publisher families. URLs must use lowercase `https://`, include a path, and contain no credentials, custom port, query, fragment, backslash, or IP-literal authority.
 2. Compute the SHA-256 digest of each exact response body and the canonical bundle hash expected by the contract.
 3. Call payable `open_request(...)` with a reward of at least `0.001 GEN` and a proposal window of at least 300 seconds.
 4. Read the request with `get_request(request_id)` and confirm the locked values.
-5. From another account, call payable `propose_answer(...)` with the exact `bond_size` returned by the request.
+5. From another account, call payable `propose_answer(...)` with the exact `bond_size` returned by the request and 2–6 unique locked citations spanning two publisher families.
 6. Read the proposal with `get_proposal(request_id, proposal_id)`.
 7. After `finalize_after`, call `finalize(request_id)`.
-8. Verify `get_result(request_id)`, `get_request(request_id)`, and `is_resolved(request_id)` from finalized state.
+8. Verify `get_result(request_id)`, `get_request(request_id)`, and `is_resolved(request_id)` from finalized state. Confirm that `decision_hash` is a 64-character SHA-256 commitment and matches `final_decision_hash` in the full request record.
 
 ## 5. Evidence to preserve for the contribution
 

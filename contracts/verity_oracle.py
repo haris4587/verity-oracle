@@ -36,7 +36,7 @@ import hashlib
 import json
 
 
-CONTRACT_VERSION = "1.1.0"
+CONTRACT_VERSION = "1.2.0"
 
 # Lifecycle
 STATUS_OPEN = "OPEN"
@@ -61,10 +61,15 @@ MIN_VERIFIED_FOR_VERDICT = 2
 MIN_WINDOW_SECONDS = 300            # 5 minutes
 MAX_WINDOW_SECONDS = 90 * 24 * 3600  # 90 days
 MIN_GRACE_SECONDS = 60
+MAX_GRACE_SECONDS = 30 * 24 * 3600  # 30 days
 MIN_REWARD = 10**15                  # 0.001 GEN
+MAX_PROPOSALS_PER_REQUEST = 32
 MAX_QUESTION_CHARS = 1000
 MAX_RATIONALE_CHARS = 1200
 MAX_CATEGORY_CHARS = 60
+MAX_SOURCE_URLS_JSON_CHARS = 4_000
+MAX_SOURCE_HASHES_JSON_CHARS = 600
+MAX_CITATIONS_JSON_CHARS = 4_000
 MAX_SOURCE_BYTES = 2_000_000
 SOURCE_TEXT_CAP = 6000               # per-source text shown to the jury
 TOTAL_TEXT_CAP = 18000               # total evidence text shown to the jury
@@ -97,6 +102,44 @@ def _canonical_bundle(urls, hashes) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _source_family(host: str) -> str:
+    """Conservatively group subdomains that are controlled by one publisher."""
+    labels = host.lower().split(".")
+    if len(labels) <= 2:
+        return host.lower()
+    common_second_level = (
+        "ac", "co", "com", "edu", "gov", "net", "org",
+    )
+    if len(labels) >= 3 and labels[-2] in common_second_level and len(labels[-1]) == 2:
+        return ".".join(labels[-3:])
+    return ".".join(labels[-2:])
+
+
+def _host_from_canonical_https(url: str) -> str:
+    prefix = "https://"
+    if not isinstance(url, str) or not url.startswith(prefix):
+        return ""
+    slash = url.find("/", len(prefix))
+    if slash < 0:
+        return ""
+    return url[len(prefix):slash].lower()
+
+
+def _decision_hash(bundle_hash: str, result: dict) -> str:
+    """Commit the consensus-backed record stored with the settlement."""
+    payload = {
+        "bundle_hash": bundle_hash,
+        "citations": sorted(result["citations"]),
+        "confidence_band": result["confidence_band"],
+        "evidence_quality": result["evidence_quality"],
+        "manifest": result["manifest"],
+        "verdict": result["verdict"],
+        "verified_urls": sorted(result["verified_urls"]),
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def _normalize_verdict(data, verified_urls, manifest):
     """Pure helper: validate and normalize the jury output. Never touches storage."""
     assert isinstance(data, dict), "jury output must be a JSON object"
@@ -123,10 +166,24 @@ def _normalize_verdict(data, verified_urls, manifest):
         if citation in verified_urls and citation not in clean_citations:
             clean_citations.append(citation)
 
-    # Defensive: a weak, non-unanimous-looking TRUE/FALSE is treated as
-    # unresolved. The safe direction is always the non-punishing one.
-    if verdict in (VERDICT_TRUE, VERDICT_FALSE) and evidence_quality < 40:
-        verdict = VERDICT_UNRESOLVABLE
+    clean_citations.sort()
+    citation_families = set()
+    for citation in clean_citations:
+        citation_families.add(_source_family(_host_from_canonical_https(citation)))
+
+    # A punitive binary settlement needs a meaningful quality score and
+    # citations to at least two independently controlled authenticated sources.
+    # Any malformed or weak answer is forced into the non-punitive fallback.
+    if verdict in (VERDICT_TRUE, VERDICT_FALSE):
+        if evidence_quality < 60 or len(clean_citations) < 2 or len(citation_families) < 2:
+            verdict = VERDICT_UNRESOLVABLE
+            confidence_band = "LOW"
+            clean_citations = []
+            rationale = (
+                "The binary jury response did not meet the contract's minimum "
+                "quality and independent authenticated-citation requirements. "
+                "The request is therefore unresolved and no proposal is punished."
+            )
 
     return {
         "verdict": verdict,
@@ -185,6 +242,10 @@ class OracleRequest:
     final_verdict: str
     final_manifest_json: str
     final_rationale: str
+    final_citations_json: str
+    final_confidence_band: str
+    final_evidence_quality: u256
+    final_decision_hash: str
     resolved_at: u256
 
 
@@ -246,6 +307,16 @@ class VerityOracle(gl.Contract):
     def _only_owner(self) -> None:
         assert gl.message.sender_address == self.owner, "only owner"
 
+    def _require_id(self, value: str, label: str, minimum: int) -> str:
+        clean = value.strip()
+        if len(clean) < minimum or len(clean) > 80:
+            raise gl.vm.UserError(label + " must contain " + str(minimum) + " to 80 characters")
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+        for char in clean:
+            if char not in allowed:
+                raise gl.vm.UserError(label + " contains unsupported characters")
+        return clean
+
     def _require_request(self, request_id: str) -> OracleRequest:
         if not self.request_exists.get(request_id, False):
             raise gl.vm.UserError("Request not found: " + request_id)
@@ -261,21 +332,62 @@ class VerityOracle(gl.Contract):
         assert self.balance >= self.total_reserved, "reserve invariant violated"
         return self.balance - self.total_reserved
 
-    def _extract_host(self, url: str) -> str:
-        candidate = url.strip().lower()
-        if candidate.startswith("https://"):
-            candidate = candidate[8:]
-        elif candidate.startswith("http://"):
-            candidate = candidate[7:]
-        else:
-            return ""
-        host = candidate.split("/", 1)[0].split("@")[-1].split(":")[0]
-        if host.startswith("www."):
-            host = host[4:]
-        return host
+    def _bind_final_decision(self, request: OracleRequest, result: dict) -> OracleRequest:
+        """Persist every consensus-relevant decision field and its commitment."""
+        request.final_verdict = result["verdict"]
+        request.final_manifest_json = json.dumps(result["manifest"], sort_keys=True)
+        request.final_rationale = result["rationale"]
+        request.final_citations_json = json.dumps(sorted(result["citations"]))
+        request.final_confidence_band = result["confidence_band"]
+        request.final_evidence_quality = u256(result["evidence_quality"])
+        request.final_decision_hash = _decision_hash(request.bundle_hash, result)
+        return request
+
+    def _require_https_url(self, value: str):
+        """Return the exact canonical URL, exact host, and publisher family."""
+        clean = value.strip()
+        if not clean.startswith("https://"):
+            raise gl.vm.UserError("Sources must begin with lowercase https://")
+        if len(clean) > 500 or "?" in clean or "#" in clean or "\\" in clean:
+            raise gl.vm.UserError("Sources must be canonical URLs without query, fragment, or backslash")
+
+        slash = clean.find("/", len("https://"))
+        if slash < 0 or slash == len(clean) - 1:
+            raise gl.vm.UserError("Every source must identify a public HTTPS resource path")
+        authority = clean[len("https://"):slash]
+        if not authority or "@" in authority or ":" in authority or "%" in authority:
+            raise gl.vm.UserError("Source authority must not contain credentials, ports, or encoding")
+        if authority != authority.lower():
+            raise gl.vm.UserError("Source hostnames must be lowercase")
+
+        host = authority
+        if len(host) < 4 or len(host) > 253 or "." not in host:
+            raise gl.vm.UserError("Source must use a canonical public DNS hostname")
+        if host.startswith(".") or host.endswith(".") or ".." in host:
+            raise gl.vm.UserError("Source hostname contains an empty DNS label")
+        allowed = "abcdefghijklmnopqrstuvwxyz0123456789-."
+        if any(char not in allowed for char in host):
+            raise gl.vm.UserError("Source hostname contains unsupported characters")
+        for label in host.split("."):
+            if not label or len(label) > 63 or label.startswith("-") or label.endswith("-"):
+                raise gl.vm.UserError("Source hostname contains an invalid DNS label")
+        if all(char in "0123456789." for char in host):
+            raise gl.vm.UserError("IP-address sources are not allowed")
+        blocked_suffixes = ("localhost", "local", "internal", "invalid", "test", "example")
+        if host in blocked_suffixes:
+            raise gl.vm.UserError("Private or reserved source hostname is not allowed")
+        for suffix in blocked_suffixes:
+            if host.endswith("." + suffix):
+                raise gl.vm.UserError("Private or reserved source hostname is not allowed")
+
+        return clean, host, _source_family(host)
 
     def _validate_source_set(self, source_urls_json: str, source_hashes_json: str, bundle_hash: str):
         """Validate and authenticate the locked evidence set at request open."""
+        if len(source_urls_json) > MAX_SOURCE_URLS_JSON_CHARS:
+            raise gl.vm.UserError("Source URL payload is too large")
+        if len(source_hashes_json) > MAX_SOURCE_HASHES_JSON_CHARS:
+            raise gl.vm.UserError("Source hash payload is too large")
         urls = json.loads(source_urls_json)
         hashes = json.loads(source_hashes_json)
 
@@ -289,36 +401,27 @@ class VerityOracle(gl.Contract):
         normalized_urls = []
         normalized_hashes = []
         hosts = set()
+        families = set()
         seen_urls = set()
         for index in range(len(urls)):
             url = urls[index]
             digest = hashes[index]
             if not isinstance(url, str) or not isinstance(digest, str):
                 raise gl.vm.UserError("Source entries must be strings")
-            clean_url = url.strip()
+            clean_url, host, family = self._require_https_url(url)
             clean_hash = digest.strip().lower()
-            if not clean_url.lower().startswith("https://"):
-                raise gl.vm.UserError("Sources must be https URLs")
-            if len(clean_url) > 500:
-                raise gl.vm.UserError("Source URL is too long")
-            lowered = clean_url.lower()
-            blocked = ("localhost", "127.0.0.1", "0.0.0.0", "169.254.", "192.168.", "10.")
-            if any(token in lowered for token in blocked):
-                raise gl.vm.UserError("Private or local network sources are not allowed")
             if clean_url in seen_urls:
                 raise gl.vm.UserError("Duplicate source URL: " + clean_url)
             if not _is_sha256_text(clean_hash):
                 raise gl.vm.UserError("Committed hash must be a 64-character SHA-256 digest")
-            host = self._extract_host(clean_url)
-            if host == "":
-                raise gl.vm.UserError("Could not parse source host")
             seen_urls.add(clean_url)
             hosts.add(host)
+            families.add(family)
             normalized_urls.append(clean_url)
             normalized_hashes.append(clean_hash)
 
-        if len(hosts) < MIN_SOURCES:
-            raise gl.vm.UserError("Sources must span at least two independent hosts")
+        if len(families) < MIN_SOURCES:
+            raise gl.vm.UserError("Sources must span at least two independent publisher families")
 
         calculated = _canonical_bundle(normalized_urls, normalized_hashes)
         if calculated != bundle_hash.strip().lower():
@@ -381,7 +484,8 @@ class VerityOracle(gl.Contract):
                     if source_status == "VERIFIED":
                         verified_urls.append(url)
                         text = body.decode("utf-8", errors="ignore")
-                        allowed = max(0, SOURCE_TEXT_CAP if total_text < TOTAL_TEXT_CAP else 0)
+                        remaining = max(0, TOTAL_TEXT_CAP - total_text)
+                        allowed = min(SOURCE_TEXT_CAP, remaining)
                         if allowed > 0:
                             slice_len = min(len(text), allowed)
                             total_text += slice_len
@@ -397,7 +501,7 @@ class VerityOracle(gl.Contract):
                             "\nSTATUS: " + source_status +
                             "\nThis source is unusable. Do not cite it.\n"
                         )
-                except Exception as exc:
+                except Exception:
                     manifest.append({
                         "url": url,
                         "http_status": 0,
@@ -405,7 +509,6 @@ class VerityOracle(gl.Contract):
                         "committed_sha256": committed,
                         "fetched_sha256": "",
                         "status": "UNAVAILABLE",
-                        "error": str(exc)[:300],
                     })
                     evidence_sections.append(
                         "SOURCE " + str(index + 1) + "\nURL: " + url +
@@ -451,8 +554,20 @@ class VerityOracle(gl.Contract):
                 "citations (array of VERIFIED urls only, [] if none)."
             )
 
-            result = gl.nondet.exec_prompt(prompt, response_format="json")
-            return _normalize_verdict(result, verified_urls, manifest)
+            try:
+                result = gl.nondet.exec_prompt(prompt, response_format="json")
+                return _normalize_verdict(result, verified_urls, manifest)
+            except Exception:
+                return _normalize_verdict({
+                    "verdict": VERDICT_UNRESOLVABLE,
+                    "confidence_band": "LOW",
+                    "evidence_quality": 0,
+                    "rationale": (
+                        "The validator jury did not return a valid bounded decision. "
+                        "The request is unresolved and no proposal is punished."
+                    ),
+                    "citations": [],
+                }, verified_urls, manifest)
 
         def validator_fn(leaders_res) -> bool:
             if not isinstance(leaders_res, gl.vm.Return):
@@ -465,12 +580,37 @@ class VerityOracle(gl.Contract):
                 # authenticated evidence set must not.
                 independent = leader_fn()
                 leader_result = leaders_res.calldata
+                required_keys = (
+                    "verdict", "confidence_band", "evidence_quality", "rationale",
+                    "citations", "verified_urls", "manifest",
+                )
+                if not isinstance(leader_result, dict):
+                    return False
+                if any(key not in leader_result for key in required_keys):
+                    return False
+                leader_normalized = _normalize_verdict(
+                    leader_result,
+                    leader_result["verified_urls"],
+                    leader_result["manifest"],
+                )
+                if leader_normalized != leader_result:
+                    return False
                 if independent["verdict"] != leader_result["verdict"]:
                     return False
                 if independent["verified_urls"] != leader_result["verified_urls"]:
                     return False
                 if independent["manifest"] != leader_result["manifest"]:
                     return False
+                independent_families = set()
+                for citation in independent["citations"]:
+                    independent_families.add(
+                        _source_family(_host_from_canonical_https(citation))
+                    )
+                if leader_result["verdict"] in (VERDICT_TRUE, VERDICT_FALSE):
+                    if len(leader_result["citations"]) < 2:
+                        return False
+                    if len(independent_families) < 2:
+                        return False
                 return True
             except Exception:
                 return False
@@ -493,9 +633,7 @@ class VerityOracle(gl.Contract):
         window_seconds: u256,
         finalize_grace_seconds: u256,
     ) -> None:
-        clean_id = request_id.strip()
-        if len(clean_id) < 6 or len(clean_id) > 80:
-            raise gl.vm.UserError("Request ID must contain 6 to 80 characters")
+        clean_id = self._require_id(request_id, "Request ID", 6)
         if self.request_exists.get(clean_id, False):
             raise gl.vm.UserError("Request ID already used: " + clean_id)
 
@@ -509,8 +647,8 @@ class VerityOracle(gl.Contract):
 
         if window_seconds < MIN_WINDOW_SECONDS or window_seconds > MAX_WINDOW_SECONDS:
             raise gl.vm.UserError("Window must be between 5 minutes and 90 days")
-        if finalize_grace_seconds < MIN_GRACE_SECONDS:
-            raise gl.vm.UserError("Finalize grace must be at least 60 seconds")
+        if finalize_grace_seconds < MIN_GRACE_SECONDS or finalize_grace_seconds > MAX_GRACE_SECONDS:
+            raise gl.vm.UserError("Finalize grace must be between 60 seconds and 30 days")
 
         if gl.message.value < MIN_REWARD:
             raise gl.vm.UserError("Reward pool must be at least 0.001 GEN")
@@ -543,6 +681,10 @@ class VerityOracle(gl.Contract):
             final_verdict="",
             final_manifest_json="[]",
             final_rationale="",
+            final_citations_json="[]",
+            final_confidence_band="",
+            final_evidence_quality=u256(0),
+            final_decision_hash="",
             resolved_at=u256(0),
         )
         self.request_exists[clean_id] = True
@@ -563,14 +705,14 @@ class VerityOracle(gl.Contract):
         request = self._require_request(request_id)
         if request.status != STATUS_OPEN:
             raise gl.vm.UserError("Request is not open for proposals")
+        if request.proposal_count >= u256(MAX_PROPOSALS_PER_REQUEST):
+            raise gl.vm.UserError("Request has reached the 32-proposal limit")
 
         now = self._now()
         if now > request.window_ends_at:
             raise gl.vm.UserError("Proposal window has closed")
 
-        clean_id = proposal_id.strip()
-        if len(clean_id) < 4 or len(clean_id) > 80:
-            raise gl.vm.UserError("Proposal ID must contain 4 to 80 characters")
+        clean_id = self._require_id(proposal_id, "Proposal ID", 4)
         key = request_id + ":" + clean_id
         if self.proposal_exists.get(key, False):
             raise gl.vm.UserError("Proposal ID already used: " + clean_id)
@@ -586,13 +728,24 @@ class VerityOracle(gl.Contract):
         if gl.message.value != request.bond_size:
             raise gl.vm.UserError("Proposal bond must equal the request bond size exactly")
 
+        if len(cited_urls_json) > MAX_CITATIONS_JSON_CHARS:
+            raise gl.vm.UserError("Citation payload is too large")
         cited = json.loads(cited_urls_json)
-        if not isinstance(cited, list) or len(cited) == 0:
-            raise gl.vm.UserError("Cite at least one locked source")
+        if not isinstance(cited, list) or len(cited) < 2 or len(cited) > MAX_SOURCES:
+            raise gl.vm.UserError("Cite between 2 and 6 locked sources")
         locked_urls = set(json.loads(request.source_urls_json))
+        clean_cited = []
+        cited_families = set()
         for url in cited:
             if not isinstance(url, str) or url.strip() not in locked_urls:
                 raise gl.vm.UserError("Citations must reference locked source URLs only")
+            clean_url = url.strip()
+            if clean_url in clean_cited:
+                raise gl.vm.UserError("Proposal citations must be unique")
+            clean_cited.append(clean_url)
+            cited_families.add(_source_family(_host_from_canonical_https(clean_url)))
+        if len(cited_families) < 2:
+            raise gl.vm.UserError("Proposal citations must span two independent publisher families")
 
         # One active position per address per request: prevents a single
         # proposer from flooding both sides and sybil-diluting the market.
@@ -608,7 +761,7 @@ class VerityOracle(gl.Contract):
             proposer=gl.message.sender_address,
             answer=clean_answer,
             rationale=clean_rationale,
-            cited_urls_json=json.dumps([u.strip() for u in cited if isinstance(u, str)]),
+            cited_urls_json=json.dumps(clean_cited),
             bond=gl.message.value,
             seq=seq,
             submitted_at=now,
@@ -650,10 +803,18 @@ class VerityOracle(gl.Contract):
 
         # No proposals at all: nobody participated, reward goes home.
         if len(active) == 0:
+            empty_result = {
+                "verdict": VERDICT_UNRESOLVABLE,
+                "confidence_band": "LOW",
+                "evidence_quality": 0,
+                "rationale": "No proposals were submitted before the window closed.",
+                "citations": [],
+                "verified_urls": [],
+                "manifest": [],
+            }
             request.status = STATUS_EXPIRED
             request.resolved_at = now
-            request.final_verdict = VERDICT_UNRESOLVABLE
-            request.final_rationale = "No proposals were submitted before the window closed."
+            request = self._bind_final_decision(request, empty_result)
             self.requests[request_id] = request
             self.total_refunded += reward
             _Recipient(request.requester).emit_transfer(value=reward)
@@ -678,9 +839,7 @@ class VerityOracle(gl.Contract):
                 self.total_bonds_returned += proposal.bond
                 _Recipient(proposal.proposer).emit_transfer(value=proposal.bond)
             request.status = STATUS_RESOLVED
-            request.final_verdict = VERDICT_UNRESOLVABLE
-            request.final_manifest_json = json.dumps(result["manifest"])
-            request.final_rationale = result["rationale"]
+            request = self._bind_final_decision(request, result)
             request.resolved_at = now
             self.requests[request_id] = request
             self.total_refunded += reward
@@ -705,9 +864,7 @@ class VerityOracle(gl.Contract):
 
             request.status = STATUS_RESOLVED
             request.winning_proposal_id = winner_pid
-            request.final_verdict = verdict
-            request.final_manifest_json = json.dumps(result["manifest"])
-            request.final_rationale = result["rationale"]
+            request = self._bind_final_decision(request, result)
             request.resolved_at = now
             self.requests[request_id] = request
 
@@ -722,9 +879,7 @@ class VerityOracle(gl.Contract):
                 self.proposals[request_id + ":" + pid] = proposal
                 self.total_bonds_slashed += proposal.bond
             request.status = STATUS_RESOLVED
-            request.final_verdict = verdict
-            request.final_manifest_json = json.dumps(result["manifest"])
-            request.final_rationale = result["rationale"]
+            request = self._bind_final_decision(request, result)
             request.resolved_at = now
             self.requests[request_id] = request
             self.total_refunded += reward
@@ -773,6 +928,10 @@ class VerityOracle(gl.Contract):
             "final_verdict": request.final_verdict,
             "final_manifest": json.loads(request.final_manifest_json),
             "final_rationale": request.final_rationale,
+            "final_citations": json.loads(request.final_citations_json),
+            "final_confidence_band": request.final_confidence_band,
+            "final_evidence_quality": int(request.final_evidence_quality),
+            "final_decision_hash": request.final_decision_hash,
             "resolved_at": int(request.resolved_at),
             "version": CONTRACT_VERSION,
         }, sort_keys=True)
@@ -810,6 +969,11 @@ class VerityOracle(gl.Contract):
             "verdict": request.final_verdict,
             "winning_proposal_id": winner,
             "winner": winner_address,
+            "bundle_hash": request.bundle_hash,
+            "decision_hash": request.final_decision_hash,
+            "citations": json.loads(request.final_citations_json),
+            "confidence_band": request.final_confidence_band,
+            "evidence_quality": int(request.final_evidence_quality),
             "resolved_at": int(request.resolved_at),
             "version": CONTRACT_VERSION,
         }, sort_keys=True)

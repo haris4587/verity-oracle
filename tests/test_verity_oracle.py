@@ -226,6 +226,24 @@ class SourceValidationTests(unittest.TestCase):
         for u in single_host:
             del SOURCE_BODIES[u]
 
+    def test_subdomains_of_one_publisher_are_not_independent(self):
+        urls = [
+            "https://news.publisher.com/report",
+            "https://blog.publisher.com/statement",
+        ]
+        for url, body in zip(urls, [b"report", b"statement"]):
+            SOURCE_BODIES[url] = body
+        _, hashes = make_source_set(urls)
+        act_as(REQUESTER, u256(10 * GEN))
+        with self.assertRaises((UserError, AssertionError)):
+            self.contract.open_request(
+                "req-family", "Question?", "GENERAL",
+                json.dumps(urls), json.dumps(hashes), bundle_hash(urls, hashes),
+                u256(3600), u256(300),
+            )
+        for url in urls:
+            del SOURCE_BODIES[url]
+
     def test_rejects_private_hosts(self):
         bad = ["https://example.com/a", "http://127.0.0.1:8080/secret"]
         for u, b in zip(bad, [b"x", b"y"]):
@@ -252,6 +270,25 @@ class SourceValidationTests(unittest.TestCase):
                 u256(3600), u256(300),
             )
 
+    def test_rejects_ambiguous_or_noncanonical_authorities(self):
+        malformed = (
+            "https://user@ledger.news/report",
+            "https://ledger.news:443/report",
+            "https://ledger.news/report?version=1",
+            "https://127.0.0.1/report",
+            "HTTPS://ledger.news/report",
+        )
+        for index, bad_url in enumerate(malformed):
+            urls = [bad_url, SOURCE_URLS[1]]
+            hashes = ["a" * 64, digest(SOURCE_URLS[1])]
+            act_as(REQUESTER, u256(10 * GEN))
+            with self.assertRaises((UserError, AssertionError), msg=bad_url):
+                self.contract.open_request(
+                    "req-bad-" + str(index), "Question?", "GENERAL",
+                    json.dumps(urls), json.dumps(hashes), bundle_hash(urls, hashes),
+                    u256(3600), u256(300),
+                )
+
     def test_rejects_wrong_bundle_hash(self):
         urls, hashes = make_source_set(SOURCE_URLS)
         act_as(REQUESTER, u256(10 * GEN))
@@ -259,6 +296,15 @@ class SourceValidationTests(unittest.TestCase):
             self.contract.open_request(
                 "req-bundle", "Question?", "GENERAL",
                 json.dumps(urls), json.dumps(hashes), "0" * 64,
+                u256(3600), u256(300),
+            )
+
+    def test_rejects_oversized_source_payload_before_parsing(self):
+        act_as(REQUESTER, u256(10 * GEN))
+        with self.assertRaises((UserError, AssertionError)):
+            self.contract.open_request(
+                "req-large", "Question?", "GENERAL",
+                " " * (verity_oracle.MAX_SOURCE_URLS_JSON_CHARS + 1), "[]", "0" * 64,
                 u256(3600), u256(300),
             )
 
@@ -281,6 +327,26 @@ class SourceValidationTests(unittest.TestCase):
                 "req-win", "Question?", "GENERAL",
                 json.dumps(urls), json.dumps(hashes), bundle_hash(urls, hashes),
                 u256(60), u256(300),
+            )
+
+    def test_grace_period_has_an_upper_bound(self):
+        urls, hashes = make_source_set(SOURCE_URLS)
+        act_as(REQUESTER, u256(10 * GEN))
+        with self.assertRaises((UserError, AssertionError)):
+            self.contract.open_request(
+                "req-grace", "Question?", "GENERAL",
+                json.dumps(urls), json.dumps(hashes), bundle_hash(urls, hashes),
+                u256(3600), u256(31 * 24 * 3600),
+            )
+
+    def test_request_id_rejects_composite_key_delimiter(self):
+        urls, hashes = make_source_set(SOURCE_URLS)
+        act_as(REQUESTER, u256(10 * GEN))
+        with self.assertRaises((UserError, AssertionError)):
+            self.contract.open_request(
+                "req:unsafe", "Question?", "GENERAL",
+                json.dumps(urls), json.dumps(hashes), bundle_hash(urls, hashes),
+                u256(3600), u256(300),
             )
 
     def test_min_reward_enforced(self):
@@ -353,6 +419,35 @@ class ProposalTests(unittest.TestCase):
                 self.contract, "prop-x", "TRUE", PROPOSER_A,
                 citations=["https://evil.xyz/fake-news"],
             )
+
+    def test_requires_two_unique_independent_citations(self):
+        with self.assertRaises((UserError, AssertionError)):
+            propose(self.contract, "prop-one", "TRUE", PROPOSER_A, citations=SOURCE_URLS[:1])
+        with self.assertRaises((UserError, AssertionError)):
+            propose(
+                self.contract, "prop-dup", "TRUE", PROPOSER_A,
+                citations=[SOURCE_URLS[0], SOURCE_URLS[0]],
+            )
+
+    def test_rejects_oversized_citation_payload_before_parsing(self):
+        request = json.loads(self.contract.get_request("req-001"))
+        act_as(PROPOSER_A, u256(request["bond_size"]))
+        with self.assertRaises((UserError, AssertionError)):
+            self.contract.propose_answer(
+                "req-001", "prop-large", "TRUE", "A valid rationale.",
+                " " * (verity_oracle.MAX_CITATIONS_JSON_CHARS + 1),
+            )
+
+    def test_proposal_id_rejects_composite_key_delimiter(self):
+        with self.assertRaises((UserError, AssertionError)):
+            propose(self.contract, "prop:unsafe", "TRUE", PROPOSER_A)
+
+    def test_request_caps_total_proposals(self):
+        for index in range(verity_oracle.MAX_PROPOSALS_PER_REQUEST):
+            proposer = Address("0xProposer" + str(index).zfill(32))
+            propose(self.contract, "prop-" + str(index).zfill(2), "TRUE", proposer)
+        with self.assertRaises((UserError, AssertionError)):
+            propose(self.contract, "prop-over", "TRUE", PROPOSER_A)
 
     def test_one_active_proposal_per_address(self):
         propose(self.contract, "prop-a", "TRUE", PROPOSER_A)
@@ -489,6 +584,30 @@ class FinalizeSettlementTests(unittest.TestCase):
         self.assertEqual(totals["total_refunded"], 10 * GEN)
         self.assertEqual(totals["balance"], 0)
 
+    def test_binary_verdict_without_citations_is_unresolvable(self):
+        self._proposals()
+        gl.nondet.default_verdict = {
+            "verdict": "TRUE",
+            "confidence_band": "HIGH",
+            "evidence_quality": 95,
+            "rationale": "Unsupported binary answer.",
+            "citations": [],
+        }
+        finalize(self.contract, self.clock)
+        request = json.loads(self.contract.get_request("req-001"))
+        self.assertEqual(request["final_verdict"], "UNRESOLVABLE")
+        self.assertEqual(request["final_citations"], [])
+
+    def test_malformed_jury_output_is_safe_unresolvable(self):
+        self._proposals()
+        gl.nondet.default_verdict = {"unexpected": "output"}
+        finalize(self.contract, self.clock)
+        request = json.loads(self.contract.get_request("req-001"))
+        self.assertEqual(request["final_verdict"], "UNRESOLVABLE")
+        totals = json.loads(self.contract.get_totals())
+        self.assertEqual(totals["total_bonds_returned"], 2 * GEN)
+        self.assertEqual(totals["total_refunded"], 10 * GEN)
+
     def test_all_stakes_returned_when_sources_unavailable(self):
         # Rebuild the world with dead sources.
         WEB_FIXTURES.clear()
@@ -622,6 +741,13 @@ class ViewTests(unittest.TestCase):
             self.assertEqual(len(entry["committed_sha256"]), 64)
             self.assertEqual(len(entry["fetched_sha256"]), 64)
             self.assertIn(entry["status"], ("VERIFIED", "HASH_MISMATCH", "UNAVAILABLE"))
+
+        result = json.loads(contract.get_result("req-001"))
+        self.assertEqual(result["citations"], sorted(SOURCE_URLS))
+        self.assertEqual(result["confidence_band"], "HIGH")
+        self.assertEqual(result["evidence_quality"], 80)
+        self.assertEqual(len(result["decision_hash"]), 64)
+        self.assertEqual(result["decision_hash"], request["final_decision_hash"])
 
 
 if __name__ == "__main__":
